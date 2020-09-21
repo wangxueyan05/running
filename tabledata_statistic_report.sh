@@ -166,14 +166,23 @@ EOF
 }
 
 add_partition() {
-        if [ $have_partition -ge 1 ]
+        if [[ $have_partition -ge 1 ]] && [[ exec_engine == hive ]]
         then
-                if [ -z $add_time ]
+                if [[ -z $add_time_hive ]] 
                 then
                         sql=$sql" where $pk_field='$partition_date'"
                 else
-                       // sql=$sql" where $pk_field='$partition_date' and $add_time >='partition_date 00:00:00' and $add_time <= 'partition_date 23:59:59"
-                fi 
+                        sql=$sql" where $pk_field='$partition_date' and $add_time_hive >='partition_date 00:00:00' and $add_time_hive <= 'partition_date 23:59:59"
+                
+        elif [[ $have_partition -ge 1 ]] && [[ exec_engine == db2 ]]
+        then
+                if [[ -z $add_time_db2 ]] 
+                then
+                        sql=$sql" where $pk_field='$partition_date'"
+                else
+                        sql=$sql" where $pk_field='$partition_date' and $add_time_db2 >='partition_date 00:00:00' and $add_time_db2 <= 'partition_date 23:59:59"
+                fi        
+                 
                 if [ ! -z $where_sql ]
                 then
                         sql=$sql" and $where_sql"
@@ -448,8 +457,9 @@ then
                 sample_num=`echo $conf | awk -F '#' '{print $9}'`
                 rate=`echo $conf | awk -F '#' '{print $10}'`
                 is_run=`echo $conf | awk -F '#' '{print $11}'`
-                add_time=`echo $conf | awk -F '#' '{print $12}'`
-                where_sql=`echo $conf | awk -F '#' '{print $13}'`
+                add_time_hive=`echo $conf | awk -F '#' '{print $12}'`
+                add_time_db2=`echo $conf | awk -F '#' '{print $13}'`
+                where_sql=`echo $conf | awk -F '#' '{print $14}'`
 		if [ "$is_run" == "n" ]
 		then
 			echo "$target_table has been excepted!"
