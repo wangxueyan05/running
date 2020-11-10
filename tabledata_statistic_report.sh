@@ -18,7 +18,7 @@ error() {
         exit 1
 }
 
-while getopts "x:a:f:t:k:d:o:c:e:n:i:s:" opts
+while getopts "x:a:f:t:k:d:o:c:e:n:i:s:h:y:mz" opts
 do
         case $opts in
                 x) exec_engine="$OPTARG";;
@@ -34,6 +34,9 @@ do
                 i) case_sql_file=$OPTARG;;
                 s) sample_num=$OPTARG;;
                 h) headn=$OPTARG;;
+                y) bank_name=$OPTARG;;
+                m) is_max_compare=1;;
+                z) is_follow_max_compare=1;;
                 ?) error;;
         esac
 done
@@ -86,10 +89,12 @@ param_check() {
 }
 
 # 环境配置
+basedir=`cd $(dirname $0); pwd -P`
 today=`date +"%Y%m%d"`
 # today=`date -d "1 days ago" +"%Y%m%d"`
 sp="###"
 dir=/tmp/tabledata_statistic/$today
+#读取配置文件中的最后一个域的字段 $config_file=config_tj/tables_list.config
 conf_name=`echo $config_file | awk -F '/' '{print $NF}'`
 ok_file=$dir/${today}_${system_type}_${conf_name}.ok
 if [ ! -d $dir ]
@@ -131,6 +136,60 @@ else
 fi
 . $ftp_export_path
 
+download() {
+        filename=$1
+        targetpath=$2
+        echo "download $filename from ftp server:/tmp/tabledata_statistic_${bank_name}/$today"
+       ftp -n <<EOF
+       open ${remote_ip}
+       user ${remote_user} ${remote_possword}
+       binary
+       cd /tmp/tabledata_statistic_${bank_name}/$today
+       bye
+EOF
+}
+wait_time=60
+max_wait_cnt=600
+ftp_file=/tmp/tabledata_statistic_${bank_name}/ftp.log
+wait4() {
+        wait_file1="$1"
+        wait_file2="$2"
+        is_ready=false
+        wait_cnt=0
+        while [ $is_ready == false ]
+        do
+                let wait_cnt=wait_cnt+1
+                exec 6>&1 1>$ftp_file
+                ftp -n <<EOF
+        open ${remote_ip}
+       user ${remote_user} ${remote_possword}
+       binary
+       cd /tmp/tabledata_statistic_${bank_name}/$today
+       ls $wait_file1
+       ls $wait_file2
+       bye
+EOF
+                exec 1>&6
+                exec 6>$-
+                cnt1=`cat $ftp_file ｜ grep $wait_file1 | wc -l`
+                cnt2=`cat $ftp_file |grep $wait_file2 | wc -l`
+                if [[  $cnt1 -ge 1  ]] && [[  $cnt2 -ge 1 ]]
+                then
+                        is_ready=true
+                else
+                        if [ $wait_cnt  -ge $max_wait_cnt ]
+                        then
+                                echo "ftp file:$wait_file1,$wait_file2 doesn't exists after wait for $max_wait_cnt times , it may be wrong"
+                                exit 1
+                        else 
+                                echo "ftp file:$wait_file1,$wait_file2 doesn't ready,wait for $wait_time s"
+                                sleep $wait_time
+                                fi
+                fi
+        done
+
+}
+
 delete() {
         dir=$1
         file=$2
@@ -145,9 +204,6 @@ EOF
         echo "delete $dir/$file"
 }
 
-# delete ok file
-delete /tmp/tabledata_statistic/$today $ok_file
-echo "delete $ok_file"
 
 upload() {
         upload_file=$1
@@ -182,7 +238,7 @@ add_partition() {
                 else
                         sql=$sql" where $pk_field='$partition_date' and $add_time_db2 >='partition_date 00:00:00' and $add_time_db2 <= 'partition_date 23:59:59"
                 fi        
-                 
+
                 if [ ! -z $where_sql ]
                 then
                         sql=$sql" and $where_sql"
@@ -276,8 +332,8 @@ statistic() {
         then
                 partition_date=`date -d "2 days ago" +"%Y-%m-%d"`
 	else
-                #partition_date=`date -d "$pk_date days ago" +"%Y-%m-%d"`
-                partition_date=$pk_date
+                partition_date=`date -d "$pk_date days ago" +"%Y-%m-%d"`
+                #partition_date=$pk_date
         fi
 	echo partition_date:$partition_date
         #拼接日志路径
@@ -290,7 +346,7 @@ statistic() {
 	else
         	if [ $exec_engine == "hive" ]
         	then
-                	have_partintio=`hive -e "desc $target_table" |grep -i $pk_field | wc -l`
+                	have_partintion=`hive -e "desc $target_table" |grep -i $pk_field | wc -l`
         	else
                 	db2 -x describe table $target_table > $db2_tmp
                 	have_partition=`cat $db2_tmp | grep -i $pk_field | wc -l`
@@ -302,6 +358,16 @@ statistic() {
 		echo "$target_table doesn't exists!" | tee -a $err_log
 		exit 1
 	fi
+        if [[ ! -z "$is_max_compare"  ]] || [[  ! -z "$is_follow_max_compare"   ]]
+        then
+                let err_cnt=$err_cnt+1
+                echo "$target_table doesn't exists!" | tee -a $err_log
+                exit 1
+        fi
+        if [[ ! -z $is_max_compare ]] || [[ ! -z  "$is_follow_max_compare" ]]
+        then
+                have_partintion=0  
+        fi
         echo "$target_table table's partition_key has $have_partition"
 	
 	#headn=20
@@ -335,28 +401,34 @@ statistic() {
         fi
         # 统计数据总量
         generate_sql "total"
-        # 统计列去重数
-        if [ ! -z $distinct_cols ]
+        if [ ! -z "$is_max_compare" ]
         then
-                for col in `echo $distinct_cols | awk -F , '{for(i=1;i<=NF;i++){printf "%s\n",$i}}'`
-                do
-                        generate_sql "distinct" $col
-                done
-        fi
-        # 统计数值类型
-        if [ ! -z $num_cols ]
-        then
-                for col in `echo $num_cols | awk -F , '{for(i=1;i<=NF;i++){printf "%s\n",$i}}'`
-                do
+                exec_sql
+        else
+                
+                # 统计列去重数
+                if [ ! -z $distinct_cols ]
+                then
+                        for col in `echo $num_cols| awk -F , '{for(i=1;i<=NF;i++){printf "%s\n",$i}}'`
+                        do
                         generate_sql "num" $col
-                done
+                        done
+                fi
+                # 统计数值类型
+                if [ ! -z $num_cols ]
+                then
+                        for col in `echo $num_cols | awk -F , '{for(i=1;i<=NF;i++){printf "%s\n",$i}}'`
+                        do
+                                generate_sql "num" $col
+                        done
+                fi
+                # 以上类型合并执行
+                exec_sql
         fi
-        # 以上类型合并执行
-        exec_sql
         total_num=`echo $result | awk '{print $1}'`
         echo "total$sp$total_num" | tee $sout_log
         distinct_cnt=0
-        if [ ! -z $distinct_cols ]
+        if [[ ! -z $distinct_cols ]] && [[  -z $is_max_compare]]
         then
                 echo result:$result
                 distinct_cnt=`echo $distinct_cols | awk -F , '{for(i=1;i<=NF;i++){printf "%s\n",$i}}' | wc -l`
@@ -368,7 +440,7 @@ statistic() {
                         echo distinct@"${distinct_cols_arr[$i]}$sp${distinct_result_arr[$i]}" | tee -a $sout_log
                 done
         fi
-        if [ ! -z $num_cols ]
+        if [[ ! -z $num_cols] ] && [[  -z $is_max_compare]]
         then
                 num_cnt=`echo $num_cols | awk -F , '{for(i=1;i<=NF;i++){printf "%s\n",$i}}' | wc -l`
                 # num_result=`echo $result | awk -v cnt="$num_cnt" -v dcnt="$distinct_cnt" '{tcnt=cnt*4;for(i=1;i<=tcnt;i++){print $(1+dcnt+i)}}'`
@@ -401,7 +473,7 @@ statistic() {
                 done
         fi
         # 统计case when区间结果
-        if [[ ! -z $case_sql_file ]] && [[ -f $case_sql_file ]]
+        if [[ ! -z $case_sql_file ]] && [[ -f $case_sql_file ]] && [[  -z $is_max_compare]]
         then
                 for i in `cat $case_sql_file`
                 do
@@ -410,7 +482,7 @@ statistic() {
                 done
         fi 
         # 抽样数据md5结果
-        if [[ ! -z $sample_num ]] && [[ -n $sample_num ]]
+        if [[ ! -z $sample_num ]] && [[ -n $sample_num ]] && [[  -z $is_max_compare]]
         then
                 generate_sql "sample"
                 # todo:check
@@ -430,6 +502,18 @@ statistic() {
 	fi
 }
 
+follow_max_compare_name=follow_max_compare_file.config
+follow_max_compare_file=/tmp/$follow_max_compare_name
+
+if [ ! -z "$is_follow_max_compare_name" ]
+then 
+        wait4 $follow_max_compare_name $follow_max_compare_name
+        download $follow_max_compare_name  $ollow_max_compare_file
+fi
+
+delete /tmp/tabledata_statistic_${bank_name}/$today $ok_file
+echo "delete $ok_file"
+
 # 读取配置文件
 if [ ! -z $config_file ]
 then
@@ -438,8 +522,9 @@ then
                 echo "config_file:$config_file doesn't exists!"
                 exit 1
         fi
-        # 配置文件结构：new_table#old_table#pk_field#pk_date#out_fields#distinct#number#enum#sample#rate#is_run
-        for conf in `cat $config_fil
+        # 配置文件结构：new_table#old_table#pk_field#pk_date#out_fields#distinct#number#enum#sample#rate#is_run#add_time
+
+        for conf in `cat $config_file`
         do
                 if [ $system_type == "old" ]
                 then
@@ -460,12 +545,22 @@ then
                 add_time_hive=`echo $conf | awk -F '#' '{print $12}'`
                 add_time_db2=`echo $conf | awk -F '#' '{print $13}'`
                 where_sql=`echo $conf | awk -F '#' '{print $14}'`
+                echo "=======where_sql:$where_sql============="
 		if [ "$is_run" == "n" ]
 		then
 			echo "$target_table has been excepted!"
 			continue
 		fi
                 echo target_table:$target_table
+                if [ ! -z "$is_follow_max_compare" ]
+                then
+                        cnt=`cat $follow_max_compare_file | grep $target_table | wc -l`
+                        if [ $cnt -gt 0 ]
+                        then
+                                echo"current table $target_table didn't pass the total count check,don't need to check the columns detail"
+                                continue
+                        fi
+                fi
                 statistic
         done
         new_cnt=`ls -al $dir | grep new | wc -l`
@@ -483,3 +578,28 @@ then
         db2 connect reset > /dev/null
         echo "reset db2 connect"
 fi
+if [ ! -z "$is_max_compare" ]
+then 
+        if [ $exec_engine == "hive" ]
+        then
+                #-m
+                echo "sh $basedir/tabledata_very_report.sh -y $bank_name -f $config_file -m"
+                sh $basedir/tabledata_very_report.sh -y $bank_name -f $config_file -m > /tmp/tabledata_verify_$bank_name/sum_$today.out
+                #-z
+                echo "sh $basedir/tabledata_statistic_report -x hive  -a new -y $bank_name -f $config_file -z"
+                sh $basedir/tabledata_statistic_report -x hive  -a new -y $bank_name -f $config_file -z >>/tmp/tabledata_verify_$bank_name/sum_$today.out
+                # -z
+                sh $basedir/tabledata_very_report.sh  -y $bank_name -f $config_file  -z >>  /tmp/tabledata_verify_$bank_name/sum_$today.out
+        else
+                #-z
+                echo "sh $basedir/tabledata_statistic_report -x db2  -a old -y $bank_name -f $config_file -z "
+                sh $basedir/tabledata_statistic_report -x db2  -a old -y $bank_name -f $config_file -z 
+                if [ $exec_engine == "hive" ]
+                then
+                        echo "sh $basedir/tabledata_very_report.sh -y $bank_name -f $config_file"
+                        if [ ! -z $config_file ]
+                        then 
+                        sh $basedir/tabledata_very_report.sh -y $bank_name -f $config_file
+                        fi
+                fi
+        fi
